@@ -32,15 +32,15 @@ class Node():
 
 class Edge():
     def __init__(
-        self, start: int, end: int, directed = False, weight = 1.0, distance = 1.0, distance_label_frac=0.3,
+        self, start: int, end: int, directed = False, weight = 1.0, length = 1.0, length_label_frac=0.3,
         stiffness = 1, x0 = 1., damping = 1.
     ):
         self.start = start
         self.end = end
         self.directed = directed
         self.weight = weight
-        self.distance = distance
-        self.distance_label_frac = distance_label_frac
+        self.length = length
+        self.length_label_frac = length_label_frac
         self.stiffness = stiffness
         self.x0 = x0
         self.damping = damping
@@ -116,6 +116,13 @@ class Graph():
         self.x[:,1] = R*np.sin(angles)
         return
     
+    def set_distance_as_edges_lengths(self):
+        def distance(x1,x2):
+            return sum((x1-x2)**2)**0.5
+        for edge in self.edges:
+            edge.length = distance(self.x[edge.start], self.x[edge.end])
+        return
+
     def init_random(self, N, M, maxcount=100000):
         print(f"\rGraph.init_random(): I will initialize the graph uniformly at random.")
         if M>N*(N-1)/2:
@@ -302,7 +309,7 @@ class Graph():
         ly = []
         cx = [] #center of segment
         cy = []
-        distances = []
+        lengths = []
         for edge in self.edges:
             s,e = (edge.start, edge.end)
             lx.append( x[s,0] )
@@ -311,14 +318,14 @@ class Graph():
             ly.append( x[s,1] )
             ly.append( x[e,1] )
             ly.append( None )
-            cx.append( (edge.distance_label_frac*x[s,0]+(1-edge.distance_label_frac)*x[e,0]) )
-            cy.append( (edge.distance_label_frac*x[s,1]+(1-edge.distance_label_frac)*x[e,1]) )
-            distances.append(str(edge.distance))
-        return (lx,ly),(cx,cy), distances
+            cx.append( (edge.length_label_frac*x[s,0]+(1-edge.length_label_frac)*x[e,0]) )
+            cy.append( (edge.length_label_frac*x[s,1]+(1-edge.length_label_frac)*x[e,1]) )
+            lengths.append(f"{edge.length:.2f}")
+        return (lx,ly),(cx,cy), lengths
     
-    def plot(self, ax=None, outpng="graphlib_plot.png"):
+    def plot(self, fig=None, ax=None, outpng="graphlib_plot.png"):
         x = self.x
-        if ax is None:
+        if fig is None or ax is None:
             fig, ax = plt.subplots()
         ax.axis('equal')
         ax.plot(x[:,0],x[:,1],'ro')
@@ -333,7 +340,7 @@ class Graph():
         plt.savefig(outpng, bbox_inches='tight')
         print(f"Graph.plot(): Figure saved into {outpng} ")
         #plt.show()
-        return
+        return fig, ax
     
     def save_relax_gif(self, X,L):
         L = L.T
@@ -410,7 +417,7 @@ class Graph():
     #--------------------------------------------------------------------#
     def dijkstra(self, idx_of_source_node: int, idx_of_target_node: int):
         """
-        # This algorithm finds the paths of minimum distance from the source node to the target node.
+        # This algorithm finds the paths of minimum GRAPH distance from the source node to the target node.
         """
         infinity = 9999999999
         dist = [infinity] * len(self)       # list of minimum distance from source to each node
@@ -432,7 +439,7 @@ class Graph():
             # Scan all neighbours of u which are still in Q
             u_neigh_in_Q = list(set(self.nodes[u].neigh) & set(Q))
             for v in u_neigh_in_Q:
-                alt = dist[u] + self.get_edge(u,v).distance
+                alt = dist[u] + self.get_edge(u,v).length
                 if alt < dist[v]:
                     dist[v] = alt
                     prev[v] = u
@@ -443,13 +450,27 @@ class Graph():
             while u is not None:
                 shortest_path.insert(0, u)
                 if prev[u] is not None:
-                    shortest_path_length += self.get_edge(prev[u],u).distance
+                    shortest_path_length += self.get_edge(prev[u],u).length
                 u = prev[u]
         return shortest_path, shortest_path_length
 
+    def plot_dijkstra(self, idx_of_source_node: int, idx_of_target_node: int, outpng="dijkstra.png"):
+        nodes_path, min_dist = self.dijkstra(idx_of_source_node, idx_of_target_node)
+        labels_path = [ self.nodes[n].label for n in nodes_path ]
+        print(f"Graph.plot_dijkstra(): Path from node {idx_of_source_node} to {idx_of_target_node}:")
+        print(f"Graph.plot_dijkstra():  ",labels_path)
+        print(f"Graph.plot_dijkstra():   distance = {min_dist:.2f}")
+        fig, ax = self.plot(outpng=outpng)
+        x_path = [ self.x[n,0] for n in nodes_path ]
+        y_path = [ self.x[n,1] for n in nodes_path ]
+        ax.plot(x_path, y_path, 'green')
+        fig.savefig(outpng, bbox_inches='tight')
+        print(f"Graph.plot_dijkstra(): Figure saved into {outpng}")
+        return fig, ax
+    
     def dijkstra_all(self, idx_of_source_node: int):
         """
-        # This algorithm finds the paths of minimum distance from the source node to each node in the graph.
+        # This algorithm finds the paths of minimum GRAPH distance from the source node to each node in the graph.
         """
         infinity = 9999999999
         dist = [infinity] * len(self)       # list of minimum distance from source to each node
@@ -469,7 +490,7 @@ class Graph():
             # Scan all neighbours of u which are still in Q
             u_neigh_in_Q = list(set(self.nodes[u].neigh) & set(Q))
             for v in u_neigh_in_Q:
-                alt = dist[u] + self.get_edge(u,v).distance
+                alt = dist[u] + self.get_edge(u,v).length
                 if alt < dist[v]:
                     dist[v] = alt
                     prev[v] = u
@@ -481,3 +502,41 @@ class Graph():
                 self.is_connected = False
                 break
         return
+
+    def A_star(self, idx_of_source_node: int, idx_of_target_node: int):
+        """
+        # This algorithm finds the paths of minimum REAL distance from the source node to the target node.
+        """
+        # PART 1: Define a potential: Euclidean distance from target node
+        def potential(node_idx):
+            return sum( ( self.x[node_idx] - self.x[idx_of_target_node])**2 )**0.5
+        # PART 2: Potential reweighting of the edges' length
+        for edge in self.edges:
+            u = edge.start
+            v = edge.end
+            edge.length += potential(v) - potential(u)
+        # PART 3: Run Dijkstra on the reweighted graph
+        min_path, min_dist = self.dijkstra(idx_of_source_node, idx_of_target_node)
+        # PART 4: Put back original lengths
+        for edge in self.edges:
+            u = edge.start
+            v = edge.end
+            edge.length += potential(u) - potential(v)
+        real_min_dist = 0.0
+        for i in range(len(min_path)-1):
+            real_min_dist += self.get_edge(min_path[i],min_path[i+1]).length
+        return min_path, real_min_dist
+    
+    def plot_A_star(self, idx_of_source_node: int, idx_of_target_node: int, outpng="A_star.png"):
+        nodes_path, min_dist = self.A_star(idx_of_source_node, idx_of_target_node)
+        labels_path = [ self.nodes[n].label for n in nodes_path ]
+        print(f"Graph.plot_A_star(): Path from node {idx_of_source_node} to {idx_of_target_node}:")
+        print(f"Graph.plot_A_star():  ",labels_path)
+        print(f"Graph.plot_A_star():   distance = {min_dist:.2f}")
+        fig, ax = self.plot(outpng=outpng)
+        x_path = [ self.x[n,0] for n in nodes_path ]
+        y_path = [ self.x[n,1] for n in nodes_path ]
+        ax.plot(x_path, y_path, 'green')
+        fig.savefig(outpng, bbox_inches='tight')
+        print(f"Graph.plot_A_star(): Figure saved into {outpng}")
+        return fig, ax
