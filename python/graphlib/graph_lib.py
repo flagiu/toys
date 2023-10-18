@@ -1,11 +1,9 @@
+import sys
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.animation
 from functools import partial
-try:
-    import cPickle as pickle
-except ModuleNotFoundError:
-    import pickle
+import pickle
 plt.rcParams["figure.dpi"] = 300
 plt.rcParams["font.size"] = 10
 
@@ -25,15 +23,18 @@ class Node():
         return len(self.neigh)
     
     def print(self):
-        print(f"({self.label}) --> {self.neigh}")
+        print(f"( {self.label} ) --> (",end='')
+        for n in self.neigh:
+            print(f" {n}",end='')
+        print(" )")
         return
 
 #----------------------------------------------------------------------------------#
 
 class Edge():
     def __init__(
-        self, start: int, end: int, directed = False, weight = 1.0, length = 1.0, length_label_frac=0.3,
-        stiffness = 1, x0 = 1., damping = 1.
+        self, start: int, end: int, directed = False, weight = 1.0,
+        length = 1.0, length_label_frac=0.3, stiffness = 1, x0 = 1., damping = 1.
     ):
         self.start = start
         self.end = end
@@ -70,9 +71,11 @@ class Graph():
     ):
         self.nodes = nodes
         self.edges = edges
+        self.A = None #adjacency matrix
         self.R = 2.0
         self.x = None
         if nodes is not None and self.edges is not None:
+            self.get_adjacency_matrix()
             self.init_neigh()
             self.init_positons()
         return
@@ -83,6 +86,15 @@ class Graph():
     def connectivity(self):
         return len(self.edges)
     
+    def get_adjacency_matrix(self):
+        A = np.zeros( (len(self.nodes),len(self.nodes)), dtype=int )
+        for edge in self.edges:
+            A[ edge.start, edge.end ] = 1
+            if not edge.directed:
+                A[ edge.end, edge.start ] = 1
+        self.A = A
+        return A.copy()
+
     def init_neigh(self):
         for node in self.nodes:
             node.neigh = []
@@ -116,9 +128,21 @@ class Graph():
         self.x[:,1] = R*np.sin(angles)
         return
     
+    def set_gaussian_edges_x0(self, mean=1.0, sigma=0.2):
+        randoms = np.random.randn(len(self.edges))
+        randoms = (randoms+mean)*sigma
+        for i,edge in enumerate(self.edges):
+            edge.x0 = max(randoms[i], 0.01)
+        return
+    
+    def set_constant_edges_lengths(self, value=1.0):
+        for edge in self.edges:
+            edge.length = value
+        return
+    
     def set_distance_as_edges_lengths(self):
         def distance(x1,x2):
-            return sum((x1-x2)**2)**0.5
+            return np.sum((x1-x2)**2)**0.5
         for edge in self.edges:
             edge.length = distance(self.x[edge.start], self.x[edge.end])
         return
@@ -158,6 +182,7 @@ class Graph():
             print(f"\rGraph.init_random(): Connected {1+edge_count}/{M} edges", end='')
         print("")
         self.init_neigh()
+        self.get_adjacency_matrix()
         return
     
     def init_powerlaw(self, N, gamma, maxcount=10000):
@@ -182,6 +207,54 @@ class Graph():
         if count>=maxcount:
             print(f"[ ERROR: could not initialize scale-fre graph with gamma={gamma} ]")
             print(f"[ Last sample of degrees: {k} ]")
+        self.init_neigh()
+        self.get_adjacency_matrix()
+        return
+    
+    def init_cayley_tree(self, degree: int, levels: int, maxcount=10000):
+        print(f"\rGraph.init_cayley_tree(): I will initialize the graph as a Cayley tree with degree {degree} and {levels} levels.")
+        if degree<2:
+            print("[ERROR: degree must be >= 3]")
+            return
+        elif degree>2:
+            N = int(1+degree/(degree-2)*( (degree-1)**levels -1) )
+        else:
+            N = 1+degree*levels
+        self.nodes = [Node(label=str(i)) for i in range(N)]
+        self.edges = []
+        old_frontier=[0]
+        x0=1.0
+        for level in range(1,levels+1): # level = 2,..,levels
+            num_new_connections = degree if level==1 else degree-1
+            len_new_frontier = num_new_connections*len(old_frontier)
+            new_frontier=[ i for i in range(old_frontier[-1]+1, old_frontier[-1]+1 + len_new_frontier ) ]
+            for i,node_idx in enumerate(old_frontier):
+                for di in range(num_new_connections):
+                    self.edges.append( Edge(node_idx, new_frontier[num_new_connections*i+di], x0=x0) )
+            old_frontier = new_frontier
+            x0/=1.5
+        self.init_neigh()
+        self.get_adjacency_matrix()
+        return
+    
+    def init_regular(self, N: int, degree: int, maxcount=10000):
+        print(f"\rGraph.init_cayley_tree(): I will initialize the graph at random using the same degree k={degree} for each node.")
+        if degree<=2:
+            print("[ERROR: degree must be >= 2]")
+            return
+        self.nodes = [Node(label=str(i)) for i in range(N)]
+        possible = False
+        count = 0
+        while (not possible) and (count<maxcount):
+            k = np.ones(N)*degree
+            # Try to connect nodes
+            possible = self.connect_nodes(k)
+            count += 1
+            print(f"\rGraph.init_regular(): Attempt {count}/{maxcount}", end='')
+        print("")
+        if count>=maxcount:
+            print(f"[ ERROR: could not initialize regular graph with degree k={degree} ]")
+        self.get_adjacency_matrix()
         return
     
     def connect_nodes(self, degrees, maxcount=10000):
@@ -228,7 +301,7 @@ class Graph():
     #--------------------------------------------------------------------------------#
 
     def relax(self, dt=0.01, tolerance=0.0001, maxcount=80000, output_every=200,
-              wall_damping=.99, repulsion_stiffness=50
+              wall_damping=.99, repulsion_stiffness=50, crunchMode = None
         ):
         print(f"\rGraph.relax(): I will relax nodes' position using a force-based method.")
         self.init_positions()
@@ -237,17 +310,28 @@ class Graph():
         m = np.array([n.mass for n in self.nodes], dtype=np.float32)
         m = m[:,None]
         x = self.x.copy()
-        L_fin = 2*np.array([[self.R,self.R]], dtype=np.float32)
+        L_fin = 4*2*np.array([[self.R,self.R]], dtype=np.float32)
         L_in = 2*L_fin
-        #print(f"Graph.relax(): Display size is {L}")
+        L_tau = 0.1
+        if crunchMode==None:
+            L_schedule = [L_fin]*maxcount
+        elif crunchMode=="lin":
+            L_schedule = [ L_fin*c/float(maxcount) + (1-c/float(maxcount))*L_in for c in range(maxcount) ]
+        elif crunchMode=="exp":
+            L_schedule = [ L_fin + (L_in-L_fin)*np.exp(-c/float(maxcount) /L_tau) for c in range(maxcount) ]
+        else:
+            print(f"Graph.relax(): ERROR: crunch mode '{crunchMode}' not recognized.\n")
+            sys.exit(1)
+        np.savetxt("L_schedule.dat", np.array(L_schedule)[:,:,0] )
+        print(f"\rGraph.relax():  L schedule saved into L_schedule.dat ")
         dx = np.empty((N,2), dtype=np.float32)
         v = np.zeros((N,2), dtype=np.float32)
         maxdx = 10
         count = 0
         X = [x]
+        maxdx_history=[]
         while maxdx > tolerance and count<maxcount:
-            xc = count/float(maxcount)
-            L = L_fin*xc + (1-xc)*L_in
+            L = L_schedule[count]
             f = np.zeros((N,2), dtype=np.float32) #forces
             # Bonded forces
             for edge in self.edges:
@@ -296,12 +380,16 @@ class Graph():
                 #print(f"\rGraph.relax(): applied spherical BC to {num_sbc} atoms at time {count}.",end="")
             
             count += 1
+            maxdx_history.append(maxdx)
             if count%output_every ==0:
                 print(f"\rGraph.relax():  [Iteration = {count}/{maxcount}], [Position_update = {maxdx:.5f}/{tolerance:.5f}]", end='')
                 X.append(x.copy())
         
         self.x = x.copy()
+        self.set_distance_as_edges_lengths()
         print(f"\rGraph.relax():  [Iteration = {count}/{maxcount}], [Position_update = {maxdx:.5f}/{tolerance:.5f}]")
+        np.savetxt("maxdx.dat", np.array(maxdx_history).T )
+        print(f"\rGraph.relax():  maximum displacement among nodes saved into maxdx.dat ")
         return X, L
     
     def get_edge_lines(self, x):
@@ -395,12 +483,15 @@ class Graph():
                                                   frames=range(len(X)), init_func=init, blit=True)
     
     def print(self):
-        print("\nNodes")
+        print("\nNodes:")
         if self.nodes is not None:
             [ n.print() for n in self.nodes ]
-        print("Edges")
+        print("Edges:")
         if self.edges is not None:
             [ e.print() for e in self.edges ]
+        if self.A is not None:
+            print("Adjacency matrix:")
+            print(self.A)
         return
     
     def save(self, filename):
@@ -413,8 +504,9 @@ class Graph():
             obj = pickle.load(inp)
         return obj
             
-    
-    #--------------------------------------------------------------------#
+    #----------------------------------------------------------------------------#
+    #---------- PATH FINDING algorithms -----------------------------------------#
+    #----------------------------------------------------------------------------#
     def dijkstra(self, idx_of_source_node: int, idx_of_target_node: int):
         """
         # This algorithm finds the paths of minimum GRAPH distance from the source node to the target node.
@@ -423,6 +515,7 @@ class Graph():
         dist = [infinity] * len(self)       # list of minimum distance from source to each node
         prev = [None] * len(self)           # list of previous step in the path from source to each node
         Q = [ i for i in range(len(self))]  # list of all node indexes
+        Q_init = np.array(Q, dtype=int)
         dist[idx_of_source_node] = 0
         while len(Q)>0:
             idx_u = 0
@@ -437,7 +530,7 @@ class Graph():
             if u == idx_of_target_node:
                 break
             # Scan all neighbours of u which are still in Q
-            u_neigh_in_Q = list(set(self.nodes[u].neigh) & set(Q))
+            u_neigh_in_Q = list(set( self.nodes[u].neigh ) & set(Q))
             for v in u_neigh_in_Q:
                 alt = dist[u] + self.get_edge(u,v).length
                 if alt < dist[v]:
@@ -540,3 +633,22 @@ class Graph():
         fig.savefig(outpng, bbox_inches='tight')
         print(f"Graph.plot_A_star(): Figure saved into {outpng}")
         return fig, ax
+    
+    #----------------------------------------------------------------------------#
+    #---------- FLOOD FILL algorithms -------------------------------------------#
+    #----------------------------------------------------------------------------#
+    def flood_fill(self, idx_of_source_node: int):
+        list_of_filled_node_idxs = [idx_of_source_node]
+        def recursive_fill(lofni, node_idx):
+            if not node_idx in lofni:
+                return lofni
+        ...
+        return list_of_filled_node_idxs
+    
+    #----------------------------------------------------------------------------#
+    #---------- MESSAGE PASSING algorithms --------------------------------------#
+    #----------------------------------------------------------------------------#
+    def as_factor_graph(self):
+        factor_graph = Graph()
+        for edge in self.edges:
+            s = edge.start
